@@ -131,6 +131,7 @@ MoEBackend = Literal[
     "flashinfer_b12x",
     "marlin",
     "humming",
+    "petit",
     "triton_unfused",
     "aiter",
     "emulation",
@@ -183,6 +184,7 @@ class KernelConfig:
       (RTX Pro 6000 / DGX Spark)
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
+    - "petit": Use Petit kernels (ROCm only)
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and

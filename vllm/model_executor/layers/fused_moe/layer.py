@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Literal, cast, overload
@@ -59,6 +60,13 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+_MOE_IO_DUMPED_KEYS: set[str] = set()
+
+
+def _clone_for_moe_io_dump(tensor: torch.Tensor | None) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    return tensor.detach().clone().cpu()
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -1308,11 +1316,94 @@ class FusedMoE(PluggableLayer):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.runner.forward(
+        dump_dir = os.environ.get("VLLM_MOE_IO_DUMP_DIR")
+        dump_this_call = False
+        dump_key = ""
+        dump_hidden_states = None
+        dump_router_logits = None
+        dump_input_ids = None
+
+        if dump_dir and not torch.compiler.is_compiling():
+            layer_id = self.layer_id
+            target_layer_id = os.environ.get("VLLM_MOE_IO_DUMP_LAYER_ID")
+            target_layer_name = os.environ.get("VLLM_MOE_IO_DUMP_LAYER_NAME")
+            target_num_tokens = os.environ.get("VLLM_MOE_IO_DUMP_NUM_TOKENS")
+            num_tokens = int(hidden_states.shape[0])
+            layer_id_matches = (
+                target_layer_id is None or str(layer_id) == target_layer_id
+            )
+            layer_name_matches = (
+                target_layer_name is None or self.layer_name == target_layer_name
+            )
+            num_tokens_matches = target_num_tokens is None or num_tokens == int(
+                target_num_tokens
+            )
+            dump_key = f"{os.getpid()}:moe_io_dump"
+            dump_this_call = (
+                layer_id_matches
+                and layer_name_matches
+                and num_tokens_matches
+                and dump_key not in _MOE_IO_DUMPED_KEYS
+            )
+            if dump_this_call:
+                dump_hidden_states = _clone_for_moe_io_dump(hidden_states)
+                dump_router_logits = _clone_for_moe_io_dump(router_logits)
+                dump_input_ids = _clone_for_moe_io_dump(input_ids)
+
+        output = self.runner.forward(
             hidden_states,
             router_logits,
             input_ids,
         )
+        if dump_this_call:
+            assert dump_dir is not None
+            assert dump_hidden_states is not None
+            assert dump_router_logits is not None
+            _MOE_IO_DUMPED_KEYS.add(dump_key)
+            os.makedirs(dump_dir, exist_ok=True)
+            safe_layer_name = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_" for c in self.layer_name
+            )
+            path = os.path.join(
+                dump_dir,
+                (
+                    f"moe_io_{safe_layer_name}_"
+                    f"tp{self.tp_rank}_ep{self.ep_rank}_pid{os.getpid()}.pt"
+                ),
+            )
+            torch.save(
+                {
+                    "metadata": {
+                        "layer_name": self.layer_name,
+                        "layer_id": self.layer_id,
+                        "pid": os.getpid(),
+                        "tp_rank": self.tp_rank,
+                        "tp_size": self.tp_size,
+                        "ep_rank": self.ep_rank,
+                        "ep_size": self.ep_size,
+                        "use_ep": self.use_ep,
+                        "hidden_states_shape": tuple(dump_hidden_states.shape),
+                        "router_logits_shape": tuple(dump_router_logits.shape),
+                        "input_ids_shape": None
+                        if dump_input_ids is None
+                        else tuple(dump_input_ids.shape),
+                        "output_shape": tuple(output.shape),
+                        "hidden_states_dtype": str(dump_hidden_states.dtype),
+                        "router_logits_dtype": str(dump_router_logits.dtype),
+                        "input_ids_dtype": None
+                        if dump_input_ids is None
+                        else str(dump_input_ids.dtype),
+                        "output_dtype": str(output.dtype),
+                    },
+                    "hidden_states": dump_hidden_states,
+                    "router_logits": dump_router_logits,
+                    "input_ids": dump_input_ids,
+                    "output": _clone_for_moe_io_dump(output),
+                },
+                path,
+            )
+            logger.warning("Dumped MoE IO reference to %s", path)
+        return output
 
     @property
     def expert_map(self) -> torch.Tensor | None:

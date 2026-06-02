@@ -76,6 +76,8 @@ class Mxfp4MoeBackend(Enum):
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
+    # ROCm Petit
+    PETIT = "PETIT"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -205,6 +207,13 @@ def backend_to_kernel_cls(
 
         return [AiterExperts]
 
+    elif backend == Mxfp4MoeBackend.PETIT:
+        from vllm.model_executor.layers.fused_moe.petit_gpt_oss_moe import (
+            PetitGptOssExperts,
+        )
+
+        return [PetitGptOssExperts]
+
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
 
@@ -255,6 +264,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
+        "petit": [Mxfp4MoeBackend.PETIT],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
@@ -273,6 +283,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        # Mxfp4MoeBackend.PETIT,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
@@ -1020,6 +1031,44 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    elif mxfp4_backend == Mxfp4MoeBackend.PETIT:
+        import petit_kernel
+
+        w13_weight = petit_kernel._deinterleave_gpt_oss_gate_up(
+            w13_weight.data.contiguous()
+        )
+        w13_weight_scale = petit_kernel._deinterleave_gpt_oss_gate_up(
+            w13_weight_scale.data.contiguous()
+        )
+        if w13_bias is not None:
+            w13_bias = petit_kernel._deinterleave_gpt_oss_gate_up(
+                w13_bias.data.contiguous()
+            )
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.contiguous()
+
+        w13_weight, w13_weight_scale = (
+            petit_kernel.repack_gpt_oss_stage1_mxfp4_kernel_layout(
+                w13_weight,
+                w13_weight_scale,
+            )
+        )
+        w2_weight, w2_weight_scale = (
+            petit_kernel.repack_gpt_oss_stage1_mxfp4_kernel_layout(
+                w2_weight.data.contiguous(),
+                w2_weight_scale.data.contiguous(),
+            )
+        )
+
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -1623,6 +1672,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.PETIT,
         Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
