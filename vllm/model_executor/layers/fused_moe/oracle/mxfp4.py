@@ -111,6 +111,18 @@ TRITON_BACKENDS = (
 )
 
 
+def _deinterleave_gpt_oss_gate_up(values: torch.Tensor) -> torch.Tensor:
+    if values.dim() < 2 or values.size(1) % 2 != 0:
+        raise ValueError("GPT-OSS gate/up tensor must have an even row dimension")
+    shape = values.shape
+    return (
+        values.view(shape[0], shape[1] // 2, 2, *shape[2:])
+        .permute(0, 2, 1, *range(3, values.dim() + 1))
+        .reshape(shape)
+        .contiguous()
+    )
+
+
 def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
@@ -1034,30 +1046,32 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend == Mxfp4MoeBackend.PETIT:
         import petit_kernel
 
-        w13_weight = petit_kernel._deinterleave_gpt_oss_gate_up(
-            w13_weight.data.contiguous()
-        )
-        w13_weight_scale = petit_kernel._deinterleave_gpt_oss_gate_up(
+        w13_weight = _deinterleave_gpt_oss_gate_up(w13_weight.data.contiguous())
+        w13_weight_scale = _deinterleave_gpt_oss_gate_up(
             w13_weight_scale.data.contiguous()
         )
         if w13_bias is not None:
-            w13_bias = petit_kernel._deinterleave_gpt_oss_gate_up(
-                w13_bias.data.contiguous()
+            w13_bias = _deinterleave_gpt_oss_gate_up(w13_bias.data.contiguous())
+            w13_bias = petit_kernel.repack_moe_kernel_layout(
+                w13_bias,
+                layout=petit_kernel.MoeKernelLayout.bf16_bias_dpp,
             )
         if w2_bias is not None:
             w2_bias = w2_bias.data.contiguous()
+            w2_bias = petit_kernel.repack_moe_kernel_layout(
+                w2_bias,
+                layout=petit_kernel.MoeKernelLayout.bf16_bias_dpp,
+            )
 
-        w13_weight, w13_weight_scale = (
-            petit_kernel.repack_gpt_oss_stage1_mxfp4_kernel_layout(
-                w13_weight,
-                w13_weight_scale,
-            )
+        w13_weight, w13_weight_scale = petit_kernel.repack_moe_kernel_layout(
+            w13_weight,
+            w13_weight_scale,
+            layout=petit_kernel.MoeKernelLayout.bf16_mxfp4_cdna4,
         )
-        w2_weight, w2_weight_scale = (
-            petit_kernel.repack_gpt_oss_stage1_mxfp4_kernel_layout(
-                w2_weight.data.contiguous(),
-                w2_weight_scale.data.contiguous(),
-            )
+        w2_weight, w2_weight_scale = petit_kernel.repack_moe_kernel_layout(
+            w2_weight.data.contiguous(),
+            w2_weight_scale.data.contiguous(),
+            layout=petit_kernel.MoeKernelLayout.bf16_mxfp4_cdna4,
         )
 
         return (

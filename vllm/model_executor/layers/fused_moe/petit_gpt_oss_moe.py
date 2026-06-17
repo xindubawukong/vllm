@@ -140,13 +140,7 @@ class PetitGptOssExperts(mk.FusedMoEExpertsModular):
             )
         )
 
-        h = torch.empty(
-            (sorted_token_ids.size(0), w2.size(1)),
-            device=hidden_states.device,
-            dtype=torch.bfloat16,
-        )
-
-        petit_kernel.ops.two_stage_moe_gpt_oss_mxfp4(
+        petit_kernel.fused_moe_bf16_mxfp4(
             hidden_states,
             w1,
             w2,
@@ -157,9 +151,7 @@ class PetitGptOssExperts(mk.FusedMoEExpertsModular):
             topk,
             self.quant_config.w1_scale,
             self.quant_config.w2_scale,
-            h,
-            0,
-            output,
-            self.quant_config.w1_bias,
-            self.quant_config.w2_bias,
+            out=output,
+            w13_bias=self.quant_config.w1_bias,
+            w2_bias=self.quant_config.w2_bias,
         )
