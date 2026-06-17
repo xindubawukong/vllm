@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -17,6 +19,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _petit_moe_quant_mode() -> str | None:
+    mode = os.getenv("VLLM_PETIT_MOE_QUANT")
+    if mode is None:
+        return None
+    if mode not in ("0", "1"):
+        raise ValueError("VLLM_PETIT_MOE_QUANT must be unset, '0', or '1'.")
+    return mode
 
 
 class PetitGptOssExperts(mk.FusedMoEExpertsModular):
@@ -140,8 +151,8 @@ class PetitGptOssExperts(mk.FusedMoEExpertsModular):
             )
         )
 
-        petit_kernel.fused_moe_bf16_mxfp4(
-            hidden_states,
+        quant_mode = _petit_moe_quant_mode()
+        common_args = (
             w1,
             w2,
             sorted_token_ids,
@@ -151,7 +162,31 @@ class PetitGptOssExperts(mk.FusedMoEExpertsModular):
             topk,
             self.quant_config.w1_scale,
             self.quant_config.w2_scale,
-            out=output,
-            w13_bias=self.quant_config.w1_bias,
-            w2_bias=self.quant_config.w2_bias,
         )
+        common_kwargs = {
+            "out": output,
+            "w13_bias": self.quant_config.w1_bias,
+            "w2_bias": self.quant_config.w2_bias,
+        }
+
+        if quant_mode in (None, "0"):
+            logger.info_once(
+                "Using petit MoE kernel: fused_moe_bf16_mxfp4 "
+                "(VLLM_PETIT_MOE_QUANT=%s).",
+                quant_mode or "unset",
+            )
+            petit_kernel.fused_moe_bf16_mxfp4(
+                hidden_states,
+                *common_args,
+                **common_kwargs,
+            )
+        else:
+            logger.info_once(
+                "Using petit MoE kernel: fused_moe_bf16_mxfp4_quantize_act "
+                "(VLLM_PETIT_MOE_QUANT=1)."
+            )
+            petit_kernel.fused_moe_bf16_mxfp4_quantize_act(
+                hidden_states,
+                *common_args,
+                **common_kwargs,
+            )
